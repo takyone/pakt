@@ -1,0 +1,9 @@
+name: repo-analyze
+version: 0.1.0
+description: Analyze a repository's tech stack, structure, dependencies, and change hotspots.
+bin:
+  name: rlens
+  entry: cmd/src/main.ts
+requires:
+  - bun
+  - git

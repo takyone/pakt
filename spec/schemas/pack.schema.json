@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pakt.dev/schemas/pack.schema.json",
+  "title": "pakt pack.yaml",
+  "type": "object",
+  "required": ["name", "version", "description"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$" },
+    "description": { "type": "string", "minLength": 1 },
+    "bin": {
+      "type": "object",
+      "required": ["name", "entry"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "entry": { "type": "string", "minLength": 1 }
+      }
+    },
+    "requires": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

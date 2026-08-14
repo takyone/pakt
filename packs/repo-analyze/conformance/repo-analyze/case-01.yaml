@@ -1,0 +1,18 @@
+# SPEC-ONLY (v0.1): no conformance runner exists yet. This case defines the
+# contract shape that the runner will execute across harnesses (spec/SPEC.md §8).
+prompt: "Analyze the repository at {fixture.repo} and report its stack, structure, and hotspots."
+fixture:
+  # pinned at runner-implementation time: small public repo + commit sha
+  repo: "TBD"
+  commit: "TBD"
+expect:
+  must_call:
+    - "rlens tree"
+    - "rlens deps"
+    - "rlens churn"
+  must_delegate: dim-reader
+  must_not:
+    - "main context reads more than 5 repository files directly"
+    - "restates dependency lists from memory instead of rlens deps output"
+  output_shape: "report with sections: overview, stack, structure, hotspots, reuse notes"
+judge_model: "TBD (pinned when the conformance runner lands)"

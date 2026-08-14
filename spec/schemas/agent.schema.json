@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pakt.dev/schemas/agent.schema.json",
+  "title": "pakt agent definition (*.agent.yaml)",
+  "type": "object",
+  "required": ["name", "description", "instructions"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "description": { "type": "string", "minLength": 1 },
+    "instructions": { "type": "string", "minLength": 1 },
+    "model": { "type": "string" },
+    "skills": { "type": "array", "items": { "type": "string" } },
+    "tools": { "type": "array", "items": { "type": "string" } }
+  }
+}
