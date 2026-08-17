@@ -41,10 +41,54 @@ nodes:
   bad: { kind: end, status: failure }
 `;
 
-function pakt(args: string[], cwd = ws) {
-  const p = Bun.spawnSync([process.execPath, MAIN, ...args], { cwd });
+function pakt(args: string[], envOverride?: Record<string, string>, dropKeys: string[] = []) {
+  const env: Record<string, string> = { ...process.env as Record<string, string>, ...envOverride };
+  for (const k of dropKeys) delete env[k];
+  const p = Bun.spawnSync([process.execPath, MAIN, ...args], { cwd: ws, env });
   return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
 }
+
+// Judge tests must NOT use spawnSync: the mock server lives in this process,
+// and a synchronous child-wait would block the event loop that serves it.
+async function paktA(args: string[], envOverride?: Record<string, string>) {
+  const env: Record<string, string> = { ...process.env as Record<string, string>, ...envOverride };
+  const p = Bun.spawn([process.execPath, MAIN, ...args], { cwd: ws, env, stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([
+    new Response(p.stdout).text(),
+    new Response(p.stderr).text(),
+    p.exited,
+  ]);
+  return { code, out, err };
+}
+
+function mockJudge(responses: string[]) {
+  let i = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      const text = responses[Math.min(i++, responses.length - 1)];
+      return new Response(JSON.stringify({ content: [{ type: "text", text }] }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  return { server, env: { ANTHROPIC_BASE_URL: `http://localhost:${server.port}`, ANTHROPIC_API_KEY: "test-key" } };
+}
+
+const JUDGE_PLAN = `
+name: j
+start: g
+nodes:
+  g:
+    kind: gate
+    judge: { model: test-model, rubric: rubric.md, votes: 3, min_pass: 2 }
+    pass: win
+    fail: retry
+    max_iters: 1
+  retry: { kind: agent, next: g }
+  win: { kind: end }
+`;
+const V = (verdict: string) => JSON.stringify({ verdict, reason: "because" });
 
 function state(run: string) {
   return JSON.parse(readFileSync(join(ws, ".pakt", "runs", run, "state.json"), "utf8"));
@@ -214,31 +258,128 @@ describe("failure semantics", () => {
     expect(JSON.stringify(st.ledger)).toContain("changed my mind");
   });
 
-  test("judge gates refuse to execute in v0.2", () => {
-    const f = join(ws, "judge.yaml");
-    writeFileSync(f, `
-name: j
-start: g
-nodes:
-  g:
-    kind: gate
-    judge: { agent: reviewer }
-    pass: z
-    fail: z
-    max_iters: 1
-  z: { kind: end }
-`);
-    pakt(["plan", "start", f, "--run", "r7", "--json"]);
-    const r = pakt(["plan", "advance", "r7", "--node", "g", "--json"]);
-    expect(r.code).toBe(2);
-    expect(JSON.parse(r.err).error.what).toContain("judge");
-  });
-
   test("report renders a timeline for any state", () => {
     const r = pakt(["plan", "report", "r4"]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("panicked");
     expect(r.out).toContain("## timeline");
     expect(r.out).toContain("## next action");
+  });
+});
+
+describe("judge gates (toolchain-executed, mock API)", () => {
+  test("2/3 pass votes → gate_pass with per-vote ledger", async () => {
+    writeFileSync(join(ws, "rubric.md"), "# rubric\npass if the material mentions apples.\n");
+    writeFileSync(join(ws, "j.plan.yaml"), JUDGE_PLAN);
+    const { server, env } = mockJudge([V("pass"), V("fail"), V("pass")]);
+    try {
+      await paktA(["plan", "start", join(ws, "j.plan.yaml"), "--run", "j1", "--json"], env);
+      const r = await paktA(["plan", "advance", "j1", "--node", "g", "--json"], env);
+      expect(r.code).toBe(0);
+      const st = state("j1");
+      expect(st.status).toBe("done"); // → win
+      const jr = st.ledger.find((e: any) => e.event === "judge_run");
+      expect(jr.detail.passes).toBe(2);
+      expect(jr.detail.votes.length).toBe(3);
+      expect(jr.detail.model).toBe("test-model");
+      expect(jr.detail.rubricHash.length).toBe(12);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("malformed judge output = failed vote, not a retry", async () => {
+    writeFileSync(join(ws, "rubric.md"), "# rubric\npass if the material mentions apples.\n");
+    writeFileSync(join(ws, "j2.plan.yaml"), JUDGE_PLAN);
+    const { server, env } = mockJudge([`Sure! Here you go: ${V("pass")}`, V("fail"), V("pass")]);
+    try {
+      await paktA(["plan", "start", join(ws, "j2.plan.yaml"), "--run", "j2", "--json"], env);
+      await paktA(["plan", "advance", "j2", "--node", "g", "--json"], env);
+      const st = state("j2");
+      const jr = st.ledger.find((e: any) => e.event === "judge_run");
+      expect(jr.detail.passes).toBe(1); // prose-wrapped JSON is malformed
+      expect(jr.detail.votes.some((v: any) => v.verdict === "malformed")).toBe(true);
+      expect(st.current).toBe("retry"); // 1 < min_pass 2 → gate_fail
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("missing ANTHROPIC_API_KEY → exit 2, but the plan loads and starts fine", () => {
+    writeFileSync(join(ws, "rubric.md"), "# rubric\n");
+    writeFileSync(join(ws, "j3.plan.yaml"), JUDGE_PLAN);
+    expect(pakt(["plan", "start", join(ws, "j3.plan.yaml"), "--run", "j3", "--json"], undefined, ["ANTHROPIC_API_KEY"]).code).toBe(0);
+    const r = pakt(["plan", "advance", "j3", "--node", "g", "--json"], undefined, ["ANTHROPIC_API_KEY"]);
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.err).error.what).toContain("ANTHROPIC_API_KEY");
+  });
+
+  test("rubric edited mid-run → panic (same invariant class as plan hash)", async () => {
+    writeFileSync(join(ws, "rubric.md"), "# rubric v1\n");
+    writeFileSync(join(ws, "j4.plan.yaml"), JUDGE_PLAN);
+    const { server, env } = mockJudge([V("pass")]);
+    try {
+      await paktA(["plan", "start", join(ws, "j4.plan.yaml"), "--run", "j4", "--json"], env);
+      writeFileSync(join(ws, "rubric.md"), "# rubric v2 (edited mid-run)\n");
+      const r = await paktA(["plan", "advance", "j4", "--node", "g", "--json"], env);
+      expect(r.code).toBe(1);
+      expect(state("j4").status).toBe("panicked");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("recovery: revive / fork", () => {
+  test("revive from exhausted is refused (termination guarantee)", () => {
+    const f = join(ws, "exh.yaml");
+    writeFileSync(f, `
+name: e
+start: g
+nodes:
+  g:
+    kind: gate
+    check: { cmd: "false" }
+    pass: z
+    fail: back
+    max_iters: 1
+  back: { kind: agent, next: g }
+  z: { kind: end }
+`);
+    pakt(["plan", "start", f, "--run", "x1", "--json"]);
+    pakt(["plan", "advance", "x1", "--node", "g", "--json"]);
+    pakt(["plan", "advance", "x1", "--node", "back", "--ok", "--json"]);
+    pakt(["plan", "advance", "x1", "--node", "g", "--json"]); // 2nd fail > max_iters, no on_exhaust
+    expect(state("x1").status).toBe("exhausted");
+    const r = pakt(["plan", "revive", "x1", "--reason", "please", "--json"]);
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.err).error.what).toContain("exhausted");
+  });
+
+  test("revive from panicked works and leaves a scar in the ledger", () => {
+    expect(state("r4").status).toBe("panicked");
+    const r = pakt(["plan", "revive", "r4", "--reason", "inspected; state is sound", "--json"]);
+    expect(r.code).toBe(0);
+    const st = state("r4");
+    expect(st.status).toBe("running");
+    expect(st.ledger.some((e: any) => e.event === "revived")).toBe(true);
+  });
+
+  test("fork carries gate budgets: exhausted lineage stays exhausted", () => {
+    const r = pakt(["plan", "fork", "x1", "--as", "x2", "--reason", "retry after env fix", "--json"]);
+    expect(r.code).toBe(0);
+    const st = state("x2");
+    expect(st.status).toBe("running");
+    expect(st.iters.g).toBe(2); // budget survives the fork
+    expect(st.ledger[0].event).toBe("forked_from");
+    pakt(["plan", "advance", "x2", "--node", "g", "--json"]);
+    expect(state("x2").status).toBe("exhausted"); // 3 > max_iters immediately
+  });
+
+  test("fork refuses a live parent and a changed plan", () => {
+    pakt(["plan", "start", planFile, "--run", "x3", "--arg", "greeting=x", "--json"]);
+    expect(pakt(["plan", "fork", "x3", "--as", "x4", "--reason", "r", "--json"]).code).toBe(2); // still running
+    // r5 was panicked precisely because its plan file changed:
+    expect(pakt(["plan", "fork", "r5", "--as", "x5", "--reason", "r", "--json"]).code).toBe(2);
   });
 });

@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 // Declarative plan (state machine) model + validation. See spec/SPEC.md §10.
 // Transitions are computed by the toolchain (planCli.ts); the LLM executes
@@ -17,6 +17,16 @@ export interface AskSpec {
   multiSelect?: boolean;
 }
 
+export interface JudgeSpec {
+  model: string;
+  rubric: string;      // as written in the plan
+  rubricPath: string;  // resolved against the plan file's directory
+  rubricHash: string;  // pinned at load; mid-run rubric edits panic like plan edits
+  votes: number;
+  min_pass: number;
+  inputs?: string[];
+}
+
 export interface PlanNode {
   kind: "cmd" | "delegate" | "gate" | "agent" | "end";
   run?: string[];
@@ -24,7 +34,7 @@ export interface PlanNode {
   next?: string;
   note?: string;
   check?: { cmd: string };
-  judge?: Record<string, unknown>; // schema-reserved; not executable in v0.2
+  judge?: JudgeSpec;
   approve?: { by: string; ask: AskSpec };
   pass?: string;
   fail?: string;
@@ -119,7 +129,24 @@ export function loadPlan(pathArg: string): Plan {
           node.check = { cmd: defRaw.check.cmd };
           collectTokens([node.check.cmd], requiredArgs);
         }
-        if (defRaw.judge !== undefined) node.judge = defRaw.judge;
+        if (defRaw.judge !== undefined) {
+          const j = defRaw.judge;
+          if (typeof j?.model !== "string" || typeof j?.rubric !== "string") {
+            bad(`${nodeName}: judge needs {model: string, rubric: string} (the model is pinned by the plan author)`);
+          }
+          const votes = j.votes ?? 1;
+          const min_pass = j.min_pass ?? Math.ceil(votes / 2);
+          if (!Number.isInteger(votes) || votes < 1) bad(`${nodeName}: judge votes must be an integer >= 1`);
+          if (!Number.isInteger(min_pass) || min_pass < 1 || min_pass > votes) {
+            bad(`${nodeName}: judge min_pass must be 1..votes`);
+          }
+          const rubricPath = resolve(dirname(path), j.rubric);
+          if (!existsSync(rubricPath)) bad(`${nodeName}: rubric not found: ${j.rubric} (resolved: ${rubricPath})`);
+          const rubricHash = new Bun.CryptoHasher("sha256").update(readFileSync(rubricPath)).digest("hex");
+          const inputs = Array.isArray(j.inputs) ? j.inputs.map(String) : undefined;
+          if (inputs) collectTokens(inputs, requiredArgs);
+          node.judge = { model: j.model, rubric: j.rubric, rubricPath, rubricHash, votes, min_pass, inputs };
+        }
         if (defRaw.approve !== undefined) {
           const ask = defRaw.approve.ask;
           if (typeof ask?.question !== "string" || !Array.isArray(ask?.options) || ask.options.length < 2) {

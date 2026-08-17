@@ -8,10 +8,10 @@ import { runInstall } from "./install";
 import { runX } from "./x";
 import { runAsk } from "./ask";
 import {
-  planAdvance, planAnswer, planNext, planReport, planStart, planStatus, planTerminate,
+  planAdvance, planAnswer, planFork, planNext, planReport, planRevive, planStart, planStatus, planTerminate,
 } from "./planCli";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 const HELP = `pakt — capability pack toolchain (reference implementation)
 
@@ -30,13 +30,16 @@ Usage:
   pakt plan status <run> [--check]      --check: exit 1 when stale or panicked
   pakt plan abort <run> --reason s      authorized stop
   pakt plan panic <run> --reason s      executor escape hatch for the unexpected
+  pakt plan revive <run> --reason s     reopen panicked/aborted only (never exhausted)
+  pakt plan fork <run> --as <new> --reason s
+                                        new lineage from a terminal run (iters carried)
   pakt plan report <run>                human-readable md from the ledger
   pakt ask --payload <q.json>           TTY fallback for approve gates
 
   pakt run ...                          (not implemented — see spec §7)
 
 The pack format and all contracts are defined in spec/SPEC.md.
-Judge gates parse but do not execute in v0.2. revive/fork: not implemented.`;
+Judge gates are executed by the toolchain (pinned model; needs ANTHROPIC_API_KEY).`;
 
 function planMain(ctx: Ctx, args: string[]): void {
   const verb = args.shift();
@@ -73,24 +76,27 @@ function planMain(ctx: Ctx, args: string[]): void {
       return planStart(ctx, runId, { run: flags.run as string | undefined, args: argKV });
     }
     case "next": return planNext(ctx, need("next"));
-    case "advance": return planAdvance(ctx, need("advance"), {
-      node: flags.node as string | undefined,
-      ok: flags.ok === true,
-      failFlag: flags.fail === true,
-      answer: flags.answer as string | undefined,
-      reason: flags.reason as string | undefined,
-      artifacts,
-    });
+    case "advance": {
+      void planAdvance(ctx, need("advance"), {
+        node: flags.node as string | undefined,
+        ok: flags.ok === true,
+        failFlag: flags.fail === true,
+        answer: flags.answer as string | undefined,
+        reason: flags.reason as string | undefined,
+        artifacts,
+      });
+      return;
+    }
     case "answer": return planAnswer(ctx, need("answer"), flags.choice as string | undefined);
     case "status": return planStatus(ctx, need("status"), { check: flags.check === true });
     case "abort": return planTerminate(ctx, need("abort"), "aborted", flags.reason as string | undefined);
     case "panic": return planTerminate(ctx, need("panic"), "panicked", flags.reason as string | undefined);
     case "report": return planReport(ctx, need("report"));
-    case "revive":
-    case "fork":
-      fail(ctx, 2, `${verb} is not implemented in v0.2`,
-        "recovery from panicked runs is designed but not built",
-        "inspect with `pakt plan report`, then start a new run");
+    case "revive": return planRevive(ctx, need("revive"), flags.reason as string | undefined);
+    case "fork": return planFork(ctx, need("fork"), {
+      as: flags.as as string | undefined,
+      reason: flags.reason as string | undefined,
+    });
     default:
       fail(ctx, 2, `unknown plan verb "${verb}"`, "plan has: start, next, advance, answer, status, abort, panic, report", "run pakt --help");
   }

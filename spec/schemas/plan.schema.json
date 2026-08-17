@@ -25,8 +25,15 @@
             "properties": { "cmd": { "type": "string" } }
           },
           "judge": {
-            "type": "object",
-            "description": "schema-reserved in v0.2; advance on a judge gate exits 2"
+            "type": "object", "required": ["model", "rubric"], "additionalProperties": false,
+            "description": "executed by the toolchain calling the pinned model; rubric hash is pinned at start",
+            "properties": {
+              "model": { "type": "string" },
+              "rubric": { "type": "string", "description": "path relative to the plan file" },
+              "votes": { "type": "integer", "minimum": 1, "default": 1 },
+              "min_pass": { "type": "integer", "minimum": 1 },
+              "inputs": { "type": "array", "items": { "type": "string" } }
+            }
           },
           "approve": {
             "type": "object", "required": ["ask"], "additionalProperties": false,

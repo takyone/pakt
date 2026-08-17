@@ -135,12 +135,20 @@ nodes and reports; `pakt plan next/advance` decides what comes next.
 - **Node kinds**: `cmd` (deterministic commands), `delegate` (subagent
   fan-out), `gate`, `agent` (LLM work in the main context), `end`.
 - **Gates** carry exactly one act: `check` (a Cmd, executed BY THE TOOLCHAIN
-  during `advance` — the executor cannot assert a pass), `judge`
-  (schema-reserved; not executable in v0.2), or `approve` (authorization by
-  `by:` — default `user` — with an AskUserQuestion-compatible ask payload;
-  every option declares `means: pass|fail|abort`). Back-edges exist only as
-  gate `fail` targets and MUST carry `max_iters`; removing fail-edges MUST
-  leave the graph acyclic (termination guarantee).
+  during `advance` — the executor cannot assert a pass), `judge`, or `approve`
+  (authorization by `by:` — default `user` — with an AskUserQuestion-compatible
+  ask payload; every option declares `means: pass|fail|abort`). Back-edges
+  exist only as gate `fail` targets and MUST carry `max_iters`; removing
+  fail-edges MUST leave the graph acyclic (termination guarantee).
+- **Judge gates** (v0.3) are executed by the toolchain calling the
+  plan-pinned model directly (never by the executor): `{model, rubric,
+  votes, min_pass, inputs?}`. The rubric file's hash is pinned at `start`
+  and a mid-run rubric edit PANICS, same invariant class as the plan hash.
+  Verdicts MUST be exact JSON `{"verdict":"pass"|"fail","reason":...}`;
+  malformed or API-erroring responses count as failed votes, never as
+  retries. Per-vote verdicts, the model, and the rubric hash are ledger
+  records. Judge gates require credentials (`ANTHROPIC_API_KEY`); packs MUST
+  remain loadable and their check/approve paths usable without them.
 - **Approve delivery** degrades: harness-native ask tool → `pakt ask` TTY
   fallback → parked run (`awaiting_approval`, exit 4 per §3) answered later
   with `pakt plan answer`. Answers are ledger records.
@@ -157,3 +165,9 @@ nodes and reports; `pakt plan next/advance` decides what comes next.
   hash mismatch, state corruption) PANIC — the run seals immediately and
   never auto-recovers. Executors MUST use `pakt plan panic --reason` for
   unexpected situations instead of improvising.
+- **Recovery** (v0.3): `fork` starts a new lineage from any terminal run
+  (plan hash MUST be unchanged; gate iteration counts carry over so budgets
+  survive the fork). `revive` reopens a run in place and applies to
+  `panicked`/`aborted` ONLY — `done`/`failure`/`exhausted` are legitimate
+  outcomes, and reviving them would reopen the door the termination
+  guarantee closed. Both require a `--reason` that becomes a ledger record.

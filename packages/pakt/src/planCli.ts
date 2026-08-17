@@ -26,6 +26,8 @@ interface RunState {
   status: "running" | "awaiting_approval" | "done" | "failure" | "exhausted" | "aborted" | "panicked";
   current: string;
   iters: Record<string, number>;
+  rubricHashes: Record<string, string>;
+  forkedFrom?: { parent: string; atSeq: number; parentStatus: string };
   ledger: LedgerEntry[];
 }
 
@@ -102,7 +104,12 @@ function nodePayload(st: RunState, plan: Plan, name: string): Record<string, unk
   if (node.run) payload.commands = node.run.map((c) => resolveTokens(c, rd, st.args));
   if (node.agent) payload.agent = node.agent;
   if (node.check) payload.check = { cmd: resolveTokens(node.check.cmd, rd, st.args), executed_by: "toolchain on advance" };
-  if (node.judge) payload.judge = "not implemented in v0.2";
+  if (node.judge) {
+    payload.judge = {
+      model: node.judge.model, votes: node.judge.votes, min_pass: node.judge.min_pass,
+      executed_by: "toolchain on advance (requires ANTHROPIC_API_KEY)",
+    };
+  }
   if (node.approve) payload.approve = node.approve;
   if (node.note) payload.note = node.note;
   return payload;
@@ -172,6 +179,10 @@ export function planStart(ctx: Ctx, planPath: string, opts: { run?: string; args
     fail(ctx, 2, `run "${run}" already exists`, `state present at ${statePathOf(run)}`, "pick another --run id");
   }
   mkdirSync(join(runDirOf(run), "artifacts"), { recursive: true });
+  const rubricHashes: Record<string, string> = {};
+  for (const [name, node] of Object.entries(plan.nodes)) {
+    if (node.judge) rubricHashes[name] = node.judge.rubricHash;
+  }
   const st: RunState = {
     run,
     planPath: plan.path,
@@ -182,6 +193,7 @@ export function planStart(ctx: Ctx, planPath: string, opts: { run?: string; args
     status: "running",
     current: plan.start,
     iters: {},
+    rubricHashes,
     ledger: [],
   };
   record(st, "started", plan.start, { plan: plan.name, args: opts.args });
@@ -208,9 +220,58 @@ export function planNext(ctx: Ctx, run: string): void {
   });
 }
 
-export function planAdvance(ctx: Ctx, run: string, opts: {
+const JUDGE_SYSTEM = `You are a gate judge. Apply the rubric strictly to the material.
+Reply with EXACTLY one JSON object and nothing else:
+{"verdict":"pass"|"fail","reason":"<one short sentence>"}`;
+
+class JudgeConfigError extends Error {}
+
+async function judgeVote(model: string, rubric: string, inputsText: string): Promise<{ verdict: string; reason: string }> {
+  const base = process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com";
+  let res: Response;
+  try {
+    res = await fetch(`${base}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY!,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 300,
+        temperature: 0,
+        system: `${JUDGE_SYSTEM}\n\n## Rubric\n${rubric}`,
+        messages: [{ role: "user", content: `## Material\n${inputsText || "(no inputs declared)"}\n\nJudge now.` }],
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (e) {
+    return { verdict: "api_error", reason: String((e as Error).message).slice(0, 120) };
+  }
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 200);
+    if (res.status !== 429 && res.status < 500) {
+      throw new JudgeConfigError(`api ${res.status}: ${body}`);
+    }
+    return { verdict: "api_error", reason: `api ${res.status}` };
+  }
+  const data = (await res.json()) as any;
+  const text = String(data?.content?.[0]?.text ?? "").trim();
+  // Strict parse: a judge whose output needs fuzzy extraction is an unchecked
+  // assertion with extra steps. Malformed output = failed vote, not a retry.
+  try {
+    const p = JSON.parse(text);
+    if (p?.verdict === "pass" || p?.verdict === "fail") {
+      return { verdict: p.verdict, reason: String(p.reason ?? "") };
+    }
+  } catch { /* falls through to malformed */ }
+  return { verdict: "malformed", reason: text.slice(0, 120) };
+}
+
+export async function planAdvance(ctx: Ctx, run: string, opts: {
   node?: string; ok: boolean; failFlag: boolean; answer?: string; reason?: string; artifacts: string[];
-}): void {
+}): Promise<void> {
   const { st, plan } = loadRun(ctx, run);
   if (st.status === "awaiting_approval") {
     fail(ctx, 2, "run is awaiting approval", `gate ${st.current} parked this run`, `use \`pakt plan answer ${run} --choice <label>\``);
@@ -262,9 +323,58 @@ export function planAdvance(ctx: Ctx, run: string, opts: {
         return;
       }
       if (node.judge) {
-        fail(ctx, 2, "judge gates are not implemented in v0.2",
-          "a judge verdict supplied by the executor would be an unchecked assertion — the exact thing gates exist to prevent",
-          "use a check or approve gate for now (judge lands with the conformance runner)");
+        const j = node.judge;
+        if (!process.env.ANTHROPIC_API_KEY) {
+          fail(ctx, 2, "ANTHROPIC_API_KEY is not set",
+            "judge gates are executed by the toolchain calling the pinned model directly (the executor cannot assert a verdict)",
+            "export ANTHROPIC_API_KEY — check/approve paths work without it");
+        }
+        // Rubric = the judge's plan file: same mid-run-change invariant as planHash.
+        let rubricNow = "";
+        try {
+          rubricNow = new Bun.CryptoHasher("sha256").update(readFileSync(j.rubricPath)).digest("hex");
+        } catch {
+          panicNow(ctx, st, `rubric disappeared: ${j.rubric}`);
+        }
+        if (rubricNow !== st.rubricHashes[st.current]) {
+          panicNow(ctx, st, "rubric changed mid-run (hash mismatch)",
+            { node: st.current, expected: st.rubricHashes[st.current]?.slice(0, 12), actual: rubricNow.slice(0, 12) });
+        }
+        const rubric = readFileSync(j.rubricPath, "utf8");
+        const inputsText = (j.inputs ?? []).map((p) => {
+          const rp = resolveTokens(p, runDirOf(st.run), st.args);
+          let body: string;
+          try {
+            body = readFileSync(rp, "utf8").slice(0, 30_000);
+          } catch {
+            body = "(missing file)";
+          }
+          return `=== ${rp} ===\n${body}`;
+        }).join("\n\n");
+        const votes: Array<{ verdict: string; reason: string }> = [];
+        try {
+          for (let i = 0; i < j.votes; i++) {
+            votes.push(await judgeVote(j.model, rubric, inputsText));
+          }
+        } catch (e) {
+          if (e instanceof JudgeConfigError) {
+            fail(ctx, 2, "judge API rejected the request", e.message, "check ANTHROPIC_API_KEY / model name / ANTHROPIC_BASE_URL");
+          }
+          throw e;
+        }
+        const passes = votes.filter((v) => v.verdict === "pass").length;
+        record(st, "judge_run", st.current, {
+          model: j.model, rubricHash: rubricNow.slice(0, 12), min_pass: j.min_pass,
+          votes: votes.map((v) => ({ verdict: v.verdict, reason: v.reason.slice(0, 160) })),
+          passes,
+        });
+        if (passes >= j.min_pass) {
+          record(st, "gate_pass", st.current, { via: "judge" });
+          goto_(ctx, st, plan, node.pass!);
+        } else {
+          gateFail(ctx, st, plan, st.current, `judge ${passes}/${j.votes} passes (min ${j.min_pass})`);
+        }
+        return;
       }
       // approve
       if (opts.answer !== undefined) {
@@ -329,6 +439,84 @@ export function planTerminate(ctx: Ctx, run: string, status: "aborted" | "panick
     record(st, "panic", st.current, { why: reason, source: "executor escape hatch" });
   }
   finalize(ctx, st, status, reason);
+}
+
+// Raw state read for recovery verbs: unlike loadRun, plan drift here must NOT
+// panic (the parent may already be sealed) — it refuses instead.
+function readStateRaw(ctx: Ctx, run: string): RunState {
+  const path = statePathOf(run);
+  if (!existsSync(path)) {
+    fail(ctx, 2, `unknown run "${run}"`, `no state at ${path}`, "start one with `pakt plan start <plan.yaml>`");
+  }
+  return JSON.parse(readFileSync(path, "utf8")) as RunState;
+}
+
+function assertPlanUnchanged(ctx: Ctx, st: RunState, what: string): void {
+  let plan: Plan;
+  try {
+    plan = loadPlan(st.planPath);
+  } catch (e) {
+    fail(ctx, 2, `plan no longer loads: ${(e as Error).message}`, `${what} requires the original plan`, "start a new run instead");
+  }
+  if (plan.hash !== st.planHash) {
+    fail(ctx, 2, "plan file changed since this run started",
+      `${what} under a different plan would be a new run wearing an old ledger`,
+      "start a new run instead");
+  }
+}
+
+export function planRevive(ctx: Ctx, run: string, reason: string | undefined): void {
+  const st = readStateRaw(ctx, run);
+  if (!["panicked", "aborted"].includes(st.status)) {
+    fail(ctx, 2, `cannot revive a ${st.status} run`,
+      "done/failure/exhausted are legitimate outcomes, not accidents — reviving them would reopen a door the termination guarantee closed",
+      "revive applies to panicked/aborted only; otherwise start a new run (or fork)");
+  }
+  if (!reason) {
+    fail(ctx, 2, "missing --reason", "revival is a human decision and the ledger records why", 'pass --reason "..."');
+  }
+  assertPlanUnchanged(ctx, st, "revive");
+  st.status = "running";
+  record(st, "revived", st.current, { reason });
+  saveState(st);
+  emit(ctx, { run, revived: true, current: st.current }, () =>
+    `run ${run}: revived at ${st.current} (prefer fork when in doubt — a panicked run's assumptions may be corrupted)`);
+}
+
+export function planFork(ctx: Ctx, run: string, opts: { as?: string; reason?: string }): void {
+  const parent = readStateRaw(ctx, run);
+  if (!TERMINAL.has(parent.status)) {
+    fail(ctx, 2, `parent run is still ${parent.status}`, "forking a live run risks two executors on one lineage", "wait for a terminal state or abort first");
+  }
+  if (!opts.as) fail(ctx, 2, "missing --as", "fork needs a name for the child run", "pakt plan fork <run> --as <new-run> --reason ...");
+  if (!opts.reason) fail(ctx, 2, "missing --reason", "the ledger records why this lineage continues", 'pass --reason "..."');
+  if (existsSync(statePathOf(opts.as))) {
+    fail(ctx, 2, `run "${opts.as}" already exists`, `state present at ${statePathOf(opts.as)}`, "pick another --as id");
+  }
+  assertPlanUnchanged(ctx, parent, "fork");
+  mkdirSync(join(runDirOf(opts.as), "artifacts"), { recursive: true });
+  const lastSeq = parent.ledger[parent.ledger.length - 1]?.seq ?? 0;
+  const child: RunState = {
+    run: opts.as,
+    planPath: parent.planPath,
+    planHash: parent.planHash,
+    planName: parent.planName,
+    args: parent.args,
+    startedAt: new Date().toISOString(),
+    status: "running",
+    current: parent.current,
+    iters: { ...parent.iters }, // copied on purpose: gate budgets survive the fork
+    rubricHashes: { ...parent.rubricHashes },
+    forkedFrom: { parent: parent.run, atSeq: lastSeq, parentStatus: parent.status },
+    ledger: [],
+  };
+  record(child, "forked_from", parent.current, {
+    parent: parent.run, atSeq: lastSeq, parentStatus: parent.status,
+    reason: opts.reason, parentArtifacts: join(runDirOf(parent.run), "artifacts"),
+  });
+  saveState(child);
+  emit(ctx, { run: opts.as, forked_from: parent.run, current: child.current }, () =>
+    `forked ${parent.run} → ${opts.as} at ${child.current} (artifacts stay with the parent; iters carried over)`);
 }
 
 export function planReport(ctx: Ctx, run: string): void {
