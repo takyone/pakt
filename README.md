@@ -44,5 +44,13 @@ bun packages/pakt/src/main.ts install packs/repo-analyze --dry-run
 - **Naming**: one dispatcher bin per pack (noun-verb tree); bin name is API —
   renaming is a semver-major change.
 
-v0.1 scope: spec + reference toolchain + repo-analyze pack. Runner backends and
-the conformance runner are specified but not built.
+- **Plans** (v0.2): packs may ship declarative state machines
+  (`plans/*.plan.yaml`, spec §10). Transitions are computed by `pakt plan`,
+  never by the LLM; check-gate commands are executed by the toolchain during
+  `advance`; loops exist only as gate fail-edges with `max_iters`; runs live in
+  an append-only ledger with five terminal statuses and panic semantics.
+
+v0.2 scope: spec + reference toolchain + plan engine + repo-analyze pack
+(incl. `rlens verify` and `plans/analyze.plan.yaml`). Judge gates are
+schema-reserved but not executable. Runner backends, the conformance runner,
+and `plan revive/fork` are specified but not built.

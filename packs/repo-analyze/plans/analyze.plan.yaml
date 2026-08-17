@@ -1,0 +1,54 @@
+# Declarative plan for the repo-analyze skill (spec §10).
+# Control flow lives here (enforced by `pakt plan`); judgment inside nodes
+# stays with the executing agent. Loops only via gate fail-edges + max_iters.
+name: analyze
+start: collect
+nodes:
+  collect:
+    kind: cmd
+    run:
+      - "rlens tree {args.target} --json > {run_dir}/artifacts/tree.json"
+      - "rlens deps {args.target} --json > {run_dir}/artifacts/deps.json"
+      - "rlens churn {args.target} --json --top 15 > {run_dir}/artifacts/churn.json"
+    next: fanout
+
+  fanout:
+    kind: delegate
+    agent: dim-reader
+    next: verify
+
+  verify:
+    kind: gate
+    check:
+      cmd: "rlens verify {run_dir}/artifacts/findings-*.json --repo {args.target} --json"
+    pass: synthesize
+    fail: fanout
+    max_iters: 3
+    on_exhaust: fail_end
+
+  synthesize:
+    kind: agent
+    note: "Merge cmd facts + worker findings into the report (skill step 3)."
+    next: review
+
+  review:
+    kind: gate
+    approve:
+      by: user
+      ask:
+        question: "Publish the analysis report?"
+        options:
+          - { label: "publish", description: "Report looks good", means: pass }
+          - { label: "rework", description: "Send back to synthesis", means: fail }
+          - { label: "stop", description: "Abort this run", means: abort }
+    pass: done
+    fail: synthesize
+    max_iters: 2
+    on_exhaust: fail_end
+
+  done:
+    kind: end
+
+  fail_end:
+    kind: end
+    status: failure

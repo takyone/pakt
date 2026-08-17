@@ -4,6 +4,7 @@ import { fail, type Ctx } from "./cli";
 import { runTree } from "./tree";
 import { runDeps } from "./deps";
 import { runChurn } from "./churn";
+import { runVerify } from "./verify";
 
 const HELP = `rlens — deterministic repository analysis
 
@@ -12,10 +13,16 @@ Usage:
   rlens deps  [path] [--json]                    normalized dependency list from manifests
   rlens churn [path] [--json] [--top N] [--since DATE]
                                                  git change hotspots (needs git history)
+  rlens verify <findings.json...> --repo <path> [--json]
+                                                 check that every finding's evidence
+                                                 (path:line) resolves in the repo.
+                                                 Scope: shape + evidence resolution only;
+                                                 it does NOT cross-check quoted numbers.
+                                                 exit 1 = verification failed (gate-fail)
 
 Read-only and deterministic; no LLM calls. Default path: current directory.
 --json prints a stable object on stdout; errors go to stderr as
-{"error":{"what","why","remediation"}}. Exit codes: 0 ok, 1 transient, 2 bad input.`;
+{"error":{"what","why","remediation"}}. Exit codes: 0 ok, 1 transient/failed, 2 bad input.`;
 
 function main(argv: string[]): void {
   const args = [...argv];
@@ -29,7 +36,7 @@ function main(argv: string[]): void {
       console.log(HELP);
       return;
     }
-    if (a === "--top" || a === "--since") {
+    if (a === "--top" || a === "--since" || a === "--repo") {
       const v = args.shift();
       if (v === undefined) {
         fail(ctx, 2, `missing value for ${a}`, `${a} requires an argument`,
@@ -42,6 +49,10 @@ function main(argv: string[]): void {
       fail(ctx, 2, `unknown flag ${a}`, "flag is not recognized", "run rlens --help for supported flags");
     }
     positional.push(a);
+  }
+
+  if (positional[0] === "verify") {
+    return runVerify(ctx, positional.slice(1), opts.repo);
   }
 
   const [sub, pathArg] = positional;

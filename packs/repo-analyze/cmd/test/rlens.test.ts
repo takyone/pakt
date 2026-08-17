@@ -122,6 +122,46 @@ describe("churn", () => {
   });
 });
 
+describe("verify", () => {
+  test("all evidence resolves → exit 0", () => {
+    const f = join(repo, "findings-good.json");
+    writeFileSync(f, JSON.stringify({
+      dimension: "test",
+      findings: [{ point: "app has exports", evidence: "src/app.ts:2" }],
+      confidence: "high",
+    }));
+    const r = run(["verify", f, "--repo", repo, "--json"]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out).ok).toBe(true);
+  });
+
+  test("bad evidence (out of range / missing file / wrong form) → exit 1 with reasons", () => {
+    const f = join(repo, "findings-bad.json");
+    writeFileSync(f, JSON.stringify({
+      dimension: "test",
+      findings: [
+        { point: "line out of range", evidence: "src/app.ts:999" },
+        { point: "file does not exist", evidence: "ghost.py:1" },
+        { point: "not path:line form", evidence: "glob:**/*test* -> 1 match" },
+      ],
+    }));
+    const r = run(["verify", f, "--repo", repo, "--json"]);
+    expect(r.code).toBe(1);
+    const d = JSON.parse(r.out);
+    expect(d.failures.length).toBe(3);
+  });
+
+  test("unparseable findings = failed verification (exit 1), not usage error", () => {
+    const f = join(repo, "findings-broken.json");
+    writeFileSync(f, "not json at all");
+    expect(run(["verify", f, "--repo", repo, "--json"]).code).toBe(1);
+  });
+
+  test("missing --repo → exit 2", () => {
+    expect(run(["verify", "whatever.json", "--json"]).code).toBe(2);
+  });
+});
+
 describe("cli contract", () => {
   test("unknown subcommand → exit 2", () => {
     const r = run(["nope", "--json"]);

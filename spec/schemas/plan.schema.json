@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pakt.dev/schemas/plan.schema.json",
+  "title": "pakt plan (*.plan.yaml) — draft, v0.2",
+  "type": "object",
+  "required": ["name", "start", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+    "start": { "type": "string" },
+    "nodes": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": { "enum": ["cmd", "delegate", "gate", "agent", "end"] },
+          "run": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "agent": { "type": "string" },
+          "next": { "type": "string" },
+          "note": { "type": "string" },
+          "check": {
+            "type": "object", "required": ["cmd"], "additionalProperties": false,
+            "properties": { "cmd": { "type": "string" } }
+          },
+          "judge": {
+            "type": "object",
+            "description": "schema-reserved in v0.2; advance on a judge gate exits 2"
+          },
+          "approve": {
+            "type": "object", "required": ["ask"], "additionalProperties": false,
+            "properties": {
+              "by": { "type": "string", "default": "user" },
+              "ask": {
+                "type": "object", "required": ["question", "options"], "additionalProperties": false,
+                "properties": {
+                  "question": { "type": "string" },
+                  "multiSelect": { "type": "boolean" },
+                  "options": {
+                    "type": "array", "minItems": 2,
+                    "items": {
+                      "type": "object", "required": ["label", "means"], "additionalProperties": false,
+                      "properties": {
+                        "label": { "type": "string" },
+                        "description": { "type": "string" },
+                        "means": { "enum": ["pass", "fail", "abort"] }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "pass": { "type": "string" },
+          "fail": { "type": "string" },
+          "max_iters": { "type": "integer", "minimum": 1 },
+          "on_exhaust": { "type": "string" },
+          "status": { "enum": ["done", "failure"] }
+        }
+      }
+    }
+  }
+}

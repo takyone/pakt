@@ -124,3 +124,36 @@ expectations. Equivalence across harnesses is *measured*, not assumed.
 - Packs: semver; bin rename or Cmd exit-code/JSON-shape breaks are major.
 - The JSON Schemas under `spec/schemas/` are normative for file formats; prose
   here is normative for behavior.
+
+## 10. Plans (status: draft, v0.2)
+
+A pack MAY ship declarative plans (`plans/*.plan.yaml`,
+schemas/plan.schema.json): finite state machines whose transitions are
+computed by the toolchain, not by the executing LLM. The executor performs
+nodes and reports; `pakt plan next/advance` decides what comes next.
+
+- **Node kinds**: `cmd` (deterministic commands), `delegate` (subagent
+  fan-out), `gate`, `agent` (LLM work in the main context), `end`.
+- **Gates** carry exactly one act: `check` (a Cmd, executed BY THE TOOLCHAIN
+  during `advance` — the executor cannot assert a pass), `judge`
+  (schema-reserved; not executable in v0.2), or `approve` (authorization by
+  `by:` — default `user` — with an AskUserQuestion-compatible ask payload;
+  every option declares `means: pass|fail|abort`). Back-edges exist only as
+  gate `fail` targets and MUST carry `max_iters`; removing fail-edges MUST
+  leave the graph acyclic (termination guarantee).
+- **Approve delivery** degrades: harness-native ask tool → `pakt ask` TTY
+  fallback → parked run (`awaiting_approval`, exit 4 per §3) answered later
+  with `pakt plan answer`. Answers are ledger records.
+- **Templates**: command strings may use `{run_dir}` and `{args.*}` only.
+  Unresolvable tokens are a start-time error; there is no expression language.
+- **State** lives in `<cwd>/.pakt/runs/<run>/state.json`: atomic writes
+  (temp + rename), an append-only ledger, and one of five terminal statuses
+  (`done`, `failure`, `exhausted`, `aborted`, `panicked`). Silence is never
+  terminal: a run without a terminal record is open (running or stalled —
+  distinguished by ledger staleness, `pakt plan status --check`).
+- **Failure classes**: expected failures route inside the plan (retry only
+  transient errors); budget exhaustion goes to `on_exhaust`; aborts are
+  authorized stops; invariant violations (out-of-order advance, plan-file
+  hash mismatch, state corruption) PANIC — the run seals immediately and
+  never auto-recovers. Executors MUST use `pakt plan panic --reason` for
+  unexpected situations instead of improvising.
