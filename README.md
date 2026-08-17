@@ -34,6 +34,9 @@ bun packages/pakt/src/main.ts install packs/repo-analyze --dry-run
   the Harness layer is whatever loads them (each layer name is one
   industry-standard word — orchestrator/worker are roles inside the Harness
   layer, not layers).
+- **Pack vs skill**: the pack is the distribution unit (library); its skills
+  are the exported entry points (1..N per pack). This example pack exports a
+  single skill, so the two names coincide — they are still different things.
 - **Cmd layer**: deterministic, `--json` everywhere, exit codes 0 ok / 1 transient /
   2 bad input, errors as `{"error":{what,why,remediation}}` on stderr. No LLM calls.
 - **Skill layer**: explicit delegation written in SKILL.md (lowest common

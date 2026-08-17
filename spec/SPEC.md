@@ -38,6 +38,10 @@ Keywords MUST / SHOULD / MAY follow RFC 2119 usage.
 - `pack.yaml` MUST declare `name`, `version` (semver), `description`. It MAY
   declare `bin` (`{name, entry}`) and `requires` (runtime dependencies such as
   `bun`, `git`).
+- A pack ships one or more skills under `skills/<name>/`. Skills are the
+  pack's exported entry points (library : exported function). The pack name
+  and a skill name MAY coincide when the pack exports a single skill; they
+  remain different things.
 - The pack MUST NOT depend on any toolchain at Cmd runtime: Cmds are plain
   programs.
 - `adapters/` MUST be deterministically derivable from `agents/*.agent.yaml`
